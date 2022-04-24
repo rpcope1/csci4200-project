@@ -4,6 +4,8 @@ import pcapy
 import dpkt
 import argparse
 import logging
+import struct
+import statistics
 
 from collections import defaultdict, namedtuple
 from enum import Enum
@@ -21,6 +23,7 @@ def binary_to_mac(binary):
 BeaconTimingInfo = namedtuple("BeaconTimingInfo", ("capture_time", "ap_timestamp", "interval", "channel"))
 
 
+
 class AbstractAnalysis(object):
     def __init__(self):
         pass
@@ -30,7 +33,7 @@ class AbstractAnalysis(object):
 
     @staticmethod
     def _pcap_ts_to_float(pcap_ts):
-        return (pcap_ts[0]*1.0) + (pcap_ts[1]/1e5)
+        return (pcap_ts[0]*1.0) + (pcap_ts[1]/1e6)
 
     @staticmethod
     def _scapy_radiotap(payload):
@@ -86,22 +89,40 @@ class BeaconJitterAnalysis(AbstractAnalysis):
         self.bssid_beacon_timing = defaultdict(list)
 
     def analyze_frame(self, header, payload):
-        wireless_frame = self._dpkt_80211(payload)
-        scapy_wireless_frame = self._scapy_80211(payload)
+        try:
+            wireless_frame = self._dpkt_80211(payload)
+            scapy_wireless_frame = self._scapy_80211(payload)
 
-        if wireless_frame.type == dpkt.ieee80211.MGMT_TYPE and wireless_frame.subtype == dpkt.ieee80211.M_BEACON:
-            bssid = wireless_frame.mgmt.bssid
-            seen_time = self._pcap_ts_to_float(header.getts())
-            beacon = wireless_frame.beacon
-            beacon_time = beacon.timestamp
-            beacon_interval = beacon.interval
-            # beacon_channel = scapy_wireless_frame.get("channel")
-            beacon_channel = None
-            t = BeaconTimingInfo(seen_time, beacon_time, beacon_interval, beacon_channel)
-            self.bssid_beacon_timing[bssid].append(t)
-            analysis_logger.info("{0}".format(t))
-            assert False
+            if wireless_frame.type == dpkt.ieee80211.MGMT_TYPE and wireless_frame.subtype == dpkt.ieee80211.M_BEACON:
+                bssid = wireless_frame.mgmt.bssid
+                seen_time = self._pcap_ts_to_float(header.getts())
+                beacon_time = scapy_wireless_frame.timestamp
+                beacon_interval = scapy_wireless_frame.beacon_interval
+                beacon_channel = None
+                t = BeaconTimingInfo(seen_time, beacon_time, beacon_interval, beacon_channel)
+                self.bssid_beacon_timing[bssid].append(t)
+        except dpkt.dpkt.UnpackError:
+            pass
 
+
+    def summarize(self):
+        summary = ""
+        for bssid, payloads in self.bssid_beacon_timing.items():
+            if len(payloads) > 1:
+                payloads = sorted(payloads, key=lambda v: v.capture_time)
+                nominal_interval = payloads[0].interval * 1024e-6
+                analysis_logger.info("Nominal interval: {0}".format(nominal_interval))
+                jitter = []
+                for i in range(len(payloads)-1):
+                    current_jitter_ms = (payloads[i+1].capture_time - payloads[i].capture_time) - nominal_interval
+                    current_jitter_ms *= 1e3
+                    current_jitter_ms = abs(current_jitter_ms)
+                    jitter.append(current_jitter_ms)
+                summary += "BSSID: {0}\n-----\n\tMin: {1}ms\n\tMax: {2}ms\n\tAvg: {3}ms\n\tStd Dev: {4}ms\n\n".format(
+                    binary_to_mac(bssid), min(jitter), max(jitter), statistics.mean(jitter),
+                    statistics.stdev(jitter)
+                )
+        return summary
 
 
 
