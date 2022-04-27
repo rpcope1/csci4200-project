@@ -2,3 +2,5 @@ pcapy-ng
 pyric
 scapy
 dpkt
+paramiko
+matplotlib
