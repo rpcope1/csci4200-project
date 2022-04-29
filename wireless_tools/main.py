@@ -6,6 +6,7 @@ from logging.handlers import WatchedFileHandler
 from wireless_tools.capture import attach_run_capture
 from wireless_tools.analysis import attach_run_analysis
 from wireless_tools.automated import attach_run_automated
+from wireless_tools.attacks import attach_run_attacks
 
 
 LOG_FORMAT = "[%(asctime)s] - %(levelname)s - %(message)s - " \
@@ -27,6 +28,7 @@ subparsers.required = True
 attach_run_capture(subparsers.add_parser("capture-802.11-traffic"))
 attach_run_analysis(subparsers.add_parser("analyze-802.11-traffic"))
 attach_run_automated(subparsers.add_parser("automated-802.11-analysis"))
+attach_run_attacks(subparsers.add_parser("attack-802.11-traffic"))
 
 
 def setup_logging(log_file, verbosity, enable_sigusr1_debug=False):
