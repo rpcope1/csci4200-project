@@ -11,6 +11,21 @@ from functools import lru_cache
 from collections import defaultdict, namedtuple
 from enum import Enum
 
+
+def stupid_mean(v):
+    try:
+        return statistics.mean(v)
+    except statistics.StatisticsError:
+        return None
+
+
+def stupid_stddev(v):
+    try:
+        return statistics.stdev(v)
+    except statistics.StatisticsError:
+        return None
+
+
 analysis_logger = logging.getLogger(__name__)
 
 
@@ -233,7 +248,7 @@ class BeaconJitterAnalysis(AbstractAnalysis):
                 beacon_channel = None
                 t = BeaconTimingInfo(seen_time, beacon_time, beacon_interval, beacon_channel, sequence_number)
                 self.bssid_beacon_timing[bssid].append(t)
-                self.bssid_ssid_map[bssid] = wireless_frame.ssid.data.decode("utf-8")
+                self.bssid_ssid_map[bssid] = wireless_frame.ssid.data.decode("utf-8", "backslashreplace")
         except dpkt.dpkt.UnpackError:
             pass
 
@@ -252,28 +267,107 @@ class BeaconJitterAnalysis(AbstractAnalysis):
                     jitter_values[bssid] = jitter
         return jitter_values
 
+    def _get_seen_times(self):
+        return {
+            bssid: [
+                i.capture_time for i in v
+            ] for bssid, v in self.bssid_beacon_timing.items()
+        }
+
+    def _get_beacon_times(self):
+        return {
+            bssid: [
+                i.ap_timestamp for i in v
+            ] for bssid, v in self.bssid_beacon_timing.items()
+        }
+
     def summarize(self):
         summary = ""
         for bssid, jitter_data in self._generate_jitter_values().items():
             jitter_data = [abs(d) for d in jitter_data]
             jitter_data_corrected = [d for d in jitter_data if abs(d) < 102.4]
             if len(jitter_data_corrected) > 2:
-                jitter_mean_corrected = statistics.mean(jitter_data_corrected)
-                jitter_stddev_corrected = statistics.stdev(jitter_data_corrected)
+                jitter_mean_corrected = stupid_mean(jitter_data_corrected)
+                jitter_stddev_corrected = stupid_stddev(jitter_data_corrected)
             else:
                 jitter_mean_corrected = None
                 jitter_stddev_corrected = None
             summary += "BSSID: {0} ({1})\n-----\n\tMin: {2}ms\n\tMax: {3}ms\n\tAvg: {4}ms\n\tStd Dev: {5}ms\n" \
                        "\tAvg (Corrected): {6}\n\tStd Dev (Corrected): {7}\n\n".format(
-                binary_to_mac(bssid), self.bssid_ssid_map[bssid], min(jitter_data), max(jitter_data),
-                statistics.mean(jitter_data), statistics.stdev(jitter_data),
-                jitter_mean_corrected, jitter_stddev_corrected
-            )
+                            binary_to_mac(bssid), self.bssid_ssid_map[bssid], min(jitter_data), max(jitter_data),
+                            stupid_mean(jitter_data), stupid_stddev(jitter_data),
+                            jitter_mean_corrected, jitter_stddev_corrected
+                        )
         return summary
 
     def get_result_data(self):
         return {
+            "capture_times": {binary_to_mac(bssid): data for bssid, data in self._get_seen_times().items()},
+            "beacon_times": {binary_to_mac(bssid): data for bssid, data in self._get_beacon_times().items()},
             "jitter_data": {binary_to_mac(bssid): data for bssid, data in self._generate_jitter_values().items()},
+            "ssid_map": {binary_to_mac(bssid): ssid for bssid, ssid in self.bssid_ssid_map.items()}
+        }
+
+
+class BeaconUtilizationAnalysis(AbstractAnalysis):
+    RESULT_FILE_NAME = "beacon-jitter-analysis.json"
+
+    def __init__(self):
+        super(BeaconUtilizationAnalysis, self).__init__()
+        self.bssid_station_count = defaultdict(dict)
+        self.bssid_utilization_ratio = defaultdict(dict)
+        self.bssid_ssid_map = {}
+
+    @staticmethod
+    def _qbss_load_element_decoder(element):
+        assert element.ID == 11
+        station_count, utilization, available_capability = struct.unpack("<HBH", element.info)
+        return station_count, utilization/0xFF, available_capability
+
+    def analyze_frame(self, header, payload):
+        seen_time = self._pcap_ts_to_float(header.getts())
+
+        def per_layer_analysis(bssid, element):
+            if element.ID == 11:
+                sc, util, _ = self._qbss_load_element_decoder(element)
+                self.bssid_station_count[bssid][seen_time] = sc
+                self.bssid_utilization_ratio[bssid][seen_time] = util
+            if element.ID == 0:
+                self.bssid_ssid_map[bssid] = element.info.decode("utf-8", "backslashreplace")
+
+        scapy_wireless_frame = self._scapy_80211(payload)
+        if scapy_wireless_frame.haslayer(dot11.Dot11Beacon):
+            bssid = scapy_wireless_frame.getlayer(dot11.Dot11).addr3
+            beacon = scapy_wireless_frame.getlayer(dot11.Dot11Beacon)
+            self._for_each_element(bssid, beacon, per_layer_analysis)
+
+    @staticmethod
+    def _for_each_element(bssid, beacon, apply):
+        current = beacon.payload
+        while current:
+            if isinstance(current, dot11.Dot11Elt):
+                apply(bssid, current)
+            current = current.payload
+
+    def summarize(self):
+        summary = ""
+        for bssid, ssid in self.bssid_ssid_map.items():
+            utilization_values = list(self.bssid_utilization_ratio[bssid].values())
+            sc_values = list(self.bssid_station_count[bssid].values())
+            if utilization_values and sc_values:
+                summary += "BSSID: {0} ({1})\n-----\n\tMin Station Count: {2}\n\tMax Station Count: {3}" \
+                           "\n\tAvg Station Count: {4}\n\tMin Utilization: {5}\n" \
+                           "\tMax Utilization: {6}\n\tAvg Utilization: {7}\n\tStd Dev Utilization: {8}\n\n".format(
+                                binary_to_mac(bssid), self.bssid_ssid_map[bssid], min(sc_values), max(sc_values),
+                                stupid_mean(sc_values), min(utilization_values), max(utilization_values),
+                                stupid_mean(utilization_values), stupid_stddev(utilization_values)
+                           )
+        return summary
+
+    def get_result_data(self):
+        return {
+            "bssid_station_count": {binary_to_mac(bssid): v for bssid, v in self.bssid_station_count.items()},
+            "bssid_utilization_ratio": {binary_to_mac(bssid): v for bssid, v in self.bssid_utilization_ratio.items()},
             "ssid_map": {binary_to_mac(bssid): ssid for bssid, ssid in self.bssid_ssid_map.items()}
         }
 
@@ -282,16 +376,21 @@ def run_generic_analysis(fname, apply_to_frame):
     capture = pcapy.open_offline(fname)
     header, payload = capture.next()
 
+    i = 0
     while header:
+        if (i % 100) == 0:
+            analysis_logger.info("Processing packet {0}".format(i))
         apply_to_frame(header, payload)
         header, payload = capture.next()
+        i += 1
 
 
 def run_full_analyzer(analysis_file, output_file=None):
     analyzers = {
         "SimpleRetryFraction": SimpleRetryFractionAnalysis(),
         "BeaconJitterAnalysis": BeaconJitterAnalysis(),
-        "CounterAnalysis": CounterAnalysis()
+        "CounterAnalysis": CounterAnalysis(),
+        "BeaconUtilizationAnalysis": BeaconUtilizationAnalysis()
     }
     analyzer = MultipleAnalysis(analyzers)
     run_generic_analysis(analysis_file, analyzer.analyze_frame)
@@ -318,4 +417,5 @@ def attach_run_analysis(subparser: argparse.ArgumentParser):
     SimpleRetryFractionAnalysis.attach_run(subsubparsers.add_parser("SimpleRetryFraction"))
     BeaconJitterAnalysis.attach_run(subsubparsers.add_parser("BeaconJitterAnalysis"))
     CounterAnalysis.attach_run(subsubparsers.add_parser("CounterAnalysis"))
+    BeaconUtilizationAnalysis.attach_run(subsubparsers.add_parser("BeaconUtilizationAnalysis"))
     attach_run_all(subsubparsers.add_parser("RunAll"))

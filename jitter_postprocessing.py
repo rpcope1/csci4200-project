@@ -26,6 +26,7 @@ for f in os.listdir(output_directory):
             data[f] = json.load(wat)
 
         ssid_to_bssid = {v: k for k, v in data[f]["BeaconJitterAnalysis"]["ssid_map"].items()}
+        print(ssid_to_bssid)
         bssid = ssid_to_bssid[ap_ssid]
 
 assert bssid
