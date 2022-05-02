@@ -325,21 +325,25 @@ class BeaconUtilizationAnalysis(AbstractAnalysis):
         return station_count, utilization/0xFF, available_capability
 
     def analyze_frame(self, header, payload):
-        seen_time = self._pcap_ts_to_float(header.getts())
+        try:
+            seen_time = self._pcap_ts_to_float(header.getts())
 
-        def per_layer_analysis(bssid, element):
-            if element.ID == 11:
-                sc, util, _ = self._qbss_load_element_decoder(element)
-                self.bssid_station_count[bssid][seen_time] = sc
-                self.bssid_utilization_ratio[bssid][seen_time] = util
-            if element.ID == 0:
-                self.bssid_ssid_map[bssid] = element.info.decode("utf-8", "backslashreplace")
+            def per_layer_analysis(bssid, element):
+                if element.ID == 11:
+                    sc, util, _ = self._qbss_load_element_decoder(element)
+                    self.bssid_station_count[bssid][seen_time] = sc
+                    self.bssid_utilization_ratio[bssid][seen_time] = util
+                if element.ID == 0:
+                    self.bssid_ssid_map[bssid] = element.info.decode("utf-8", "backslashreplace")
 
-        scapy_wireless_frame = self._scapy_80211(payload)
-        if scapy_wireless_frame.haslayer(dot11.Dot11Beacon):
-            bssid = scapy_wireless_frame.getlayer(dot11.Dot11).addr3
-            beacon = scapy_wireless_frame.getlayer(dot11.Dot11Beacon)
-            self._for_each_element(bssid, beacon, per_layer_analysis)
+            scapy_wireless_frame = self._scapy_80211(payload)
+            wireless_frame = self._dpkt_80211(payload)
+            if scapy_wireless_frame.haslayer(dot11.Dot11Beacon):
+                bssid = wireless_frame.mgmt.bssid
+                beacon = scapy_wireless_frame.getlayer(dot11.Dot11Beacon)
+                self._for_each_element(bssid, beacon, per_layer_analysis)
+        except dpkt.UnpackError:
+            pass
 
     @staticmethod
     def _for_each_element(bssid, beacon, apply):
